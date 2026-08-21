@@ -34,5 +34,7 @@ The production files are written to `dist/`.
 
 - Main dataset: `public/eccv-data.json`
 - Social preview image: `public/og.png`
-- Bookmarks, contact status, and notes are saved in the current browser's `localStorage`.
-- Because GitHub Pages is static, tracker state does not automatically sync across browsers or devices.
+- Bookmarks, contact status, and notes are cached in the current browser and synced to the shared GitHub Gist per signed-in user.
+- Saving to the cloud requires entering a GitHub token with Gist access through the app's `Set cloud key` button on each device.
+- Do not commit or paste the token into the source code. If a token was pushed to GitHub, revoke it and create a fresh one.
+- If the status pill says `Offline`, the latest change is saved locally only until cloud sync succeeds.

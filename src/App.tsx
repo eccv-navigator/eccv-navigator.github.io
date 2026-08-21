@@ -9,44 +9,99 @@ type Tracker={stage:string;bookmarked:boolean;notes:string;lastTouched:string}; 
 type UserId="hrithik"|"madhu"|"swaroopa";
 const USERS:Record<UserId,{name:string;pass:string}>={hrithik:{name:"Hrithik",pass:"Sagar@21"},madhu:{name:"Madhu",pass:"Madhu@00"},swaroopa:{name:"Swaroopa",pass:"Swaroopa@00"}};
 const USER_KEY="eccv-user-id";
+const CLOUD_TOKEN_KEY="eccv-cloud-token";
 type AllNotes=Record<UserId,Record<string,Tracker>>;
+type SyncState="loading"|"synced"|"saving"|"offline";
 const GIST_ID="3ad9041534cb5fe977d17717196bf5a2";
 const GIST_FILE="eccv-notes.json";
-const GT="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";
-const gistHeaders={Authorization:`token ${GT}`,"Content-Type":"application/json"};
-async function fetchNotes():Promise<AllNotes>{
- const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders});
+const gistHeaders=(token?:string)=>({...(token?{Authorization:`Bearer ${token}`}:{}),Accept:"application/vnd.github+json","Content-Type":"application/json"});
+const cleanGitHubError=(message:string)=>message.includes("Bad credentials")?"Cloud key is invalid or expired":message;
+async function fetchNotes(token?:string):Promise<AllNotes>{
+ const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders(token)});
  if(!r.ok)throw new Error(`gist read failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
  const d=await r.json();
  return JSON.parse(d.files[GIST_FILE]?.content||"{}");
 }
-async function saveNotes(all:AllNotes){
- const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{method:"PATCH",headers:gistHeaders,body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(all)}}})});
+async function saveNotes(all:AllNotes,token:string){
+ if(!token)throw new Error("Cloud key required to save across devices");
+ const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{method:"PATCH",headers:gistHeaders(token),body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(all)}}})});
  if(!r.ok)throw new Error(`gist write failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
 }
+async function saveUserNotes(user:UserId,next:Record<string,Tracker>,token:string){
+ const latest=await fetchNotes(token);
+ const merged={...latest,[user]:next};
+ await saveNotes(merged,token);
+ return merged;
+}
+const newerTracker=(a?:Tracker,b?:Tracker)=>{
+ if(!a)return b;
+ if(!b)return a;
+ return (a.lastTouched||"")>=(b.lastTouched||"")?a:b;
+};
+const mergeTrackers=(local:Record<string,Tracker>,remote:Record<string,Tracker>)=>{
+ const merged:Record<string,Tracker>={};
+ for(const id of new Set([...Object.keys(remote),...Object.keys(local)]))merged[id]=newerTracker(local[id],remote[id])!;
+ return merged;
+};
+const sameTracker=(a:Record<string,Tracker>,b:Record<string,Tracker>)=>JSON.stringify(a)===JSON.stringify(b);
 const stages=["Not reviewed","Bookmark","Want to talk","Email before ECCV","Meeting planned","Talked","Follow up"];
 const priorityClass=(p:string)=>`priority priority-${p.toLowerCase()}`;
 const orbitStyle=(i:number,total:number)=>({"--i":i,"--total":total} as React.CSSProperties);
 function Icon({name}:{name:string}){const paths:Record<string,React.ReactNode>={people:<><circle cx="9" cy="8" r="3"/><path d="M3.5 19c.5-4 2.4-6 5.5-6s5 2 5.5 6M15 6.5a3 3 0 0 1 0 5.8M16.5 13.3c2.5.6 3.8 2.5 4 5.7"/></>,papers:<><path d="M6 3h9l4 4v14H6zM15 3v5h4M9 12h7M9 16h7"/></>,building:<><path d="M4 21h16M6 21V6l6-3 6 3v15M9 9h1M14 9h1M9 13h1M14 13h1M11 21v-4h2v4"/></>,network:<><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="m10.8 7.2-4.5 8M13.2 7.2l4.5 8M7.5 18h9"/></>,target:<><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 2v3M22 12h-3"/></>,search:<><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></>,star:<path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>,arrow:<path d="M5 12h14M14 7l5 5-5 5"/>,close:<path d="m6 6 12 12M18 6 6 18"/>};return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>}
 function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
  const [data,setData]=useState<Data|null>(null),[view,setView]=useState<View>("professors"),[query,setQuery]=useState(""),[priority,setPriority]=useState("All"),[institutions,setInstitutions]=useState<string[]>([]),[instOpen,setInstOpen]=useState(false),[selected,setSelected]=useState<Professor|null>(null),[tracker,setTracker]=useState<Record<string,Tracker>>({}),[paperFocus,setPaperFocus]=useState("Relevant 90");
- const [sync,setSync]=useState<"loading"|"synced"|"saving"|"offline">("loading");
+ const [sync,setSync]=useState<SyncState>("loading");
  const [syncError,setSyncError]=useState("");
+ const [cloudToken,setCloudToken]=useState(()=>localStorage.getItem(CLOUD_TOKEN_KEY)||"");
+ const [tokenDraft,setTokenDraft]=useState("");
+ const [showCloudKey,setShowCloudKey]=useState(false);
  const trackerKey=`eccv-tracker-v1-${user}`;
  const allNotes=useRef<AllNotes>({} as AllNotes);
  const saveTimer=useRef<number|undefined>(undefined);
  useEffect(()=>{fetch(`${import.meta.env.BASE_URL}eccv-data.json`).then(r=>r.json()).then(setData)},[]);
  useEffect(()=>{
+  let cancelled=false;
   const cached=localStorage.getItem(trackerKey);
-  if(cached)setTracker(JSON.parse(cached));
-  fetchNotes().then(all=>{allNotes.current=all;const mine=all[user]||{};setTracker(mine);localStorage.setItem(trackerKey,JSON.stringify(mine));setSync("synced")}).catch(e=>{setSync("offline");setSyncError(String(e?.message||e))});
- },[trackerKey,user]);
+  const local=cached?JSON.parse(cached) as Record<string,Tracker>:{};
+  if(cached)setTracker(local);
+  fetchNotes(cloudToken).then(all=>{
+   if(cancelled)return;
+   allNotes.current=all;
+   const remote=all[user]||{};
+   const merged=mergeTrackers(local,remote);
+   setTracker(merged);
+   localStorage.setItem(trackerKey,JSON.stringify(merged));
+   if(cloudToken&&!sameTracker(merged,remote)){
+    setSync("saving");
+    saveUserNotes(user,merged,cloudToken).then(saved=>{if(cancelled)return;allNotes.current=saved;setSyncError("");setSync("synced")}).catch(e=>{if(cancelled)return;setSync("offline");setSyncError(cleanGitHubError(String(e?.message||e)));setShowCloudKey(true)});
+   }else{
+    setSyncError("");
+    setSync("synced");
+   }
+  }).catch(e=>{
+   if(cancelled)return;
+   setSync("offline");
+   setSyncError(cleanGitHubError(String(e?.message||e)));
+  });
+  return ()=>{cancelled=true};
+ },[trackerKey,user,cloudToken]);
+ useEffect(()=>()=>window.clearTimeout(saveTimer.current),[]);
+ const saveCloudKey=(e:React.FormEvent)=>{
+  e.preventDefault();
+  const next=tokenDraft.trim();
+  if(!next)return;
+  localStorage.setItem(CLOUD_TOKEN_KEY,next);
+  setCloudToken(next);
+  setTokenDraft("");
+  setShowCloudKey(false);
+  setSync("loading");
+ };
  const save=(next:Record<string,Tracker>)=>{
   setTracker(next);localStorage.setItem(trackerKey,JSON.stringify(next));
   allNotes.current={...allNotes.current,[user]:next};
   setSync("saving");
   window.clearTimeout(saveTimer.current);
-  saveTimer.current=window.setTimeout(()=>{saveNotes(allNotes.current).then(()=>setSync("synced")).catch(e=>{setSync("offline");setSyncError(String(e?.message||e))})},1200);
+  saveTimer.current=window.setTimeout(()=>{saveUserNotes(user,next,cloudToken).then(all=>{allNotes.current=all;setSyncError("");setSync("synced")}).catch(e=>{setSync("offline");setSyncError(cleanGitHubError(String(e?.message||e)));setShowCloudKey(true)})},450);
  };
  const exportData=()=>{const blob=new Blob([JSON.stringify(tracker,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`eccv-notes-${user}.json`;a.click();URL.revokeObjectURL(url)};
  const importData=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{save({...tracker,...JSON.parse(String(reader.result))})}catch{alert("That file doesn't look like an exported notes file.")}};reader.readAsText(file);e.target.value=""};
@@ -57,8 +112,9 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
  const filteredPapers=useMemo(()=>{if(!data)return[];const q=query.toLowerCase();return data.papers.filter(p=>(paperFocus==="All 2,864"||p.focus)&&(!q||[p.title,p.authors,p.topic].join(" ").toLowerCase().includes(q))).sort((a,b)=>(a.focus?.rank||9999)-(b.focus?.rank||9999))},[data,query,paperFocus]);
  const tracked=data?.professors.filter(p=>tracker[p.id]&&(tracker[p.id].bookmarked||tracker[p.id].stage!=="Not reviewed"||tracker[p.id].notes))||[];
  if(!data)return <main className="loading"><div className="loader"/><p>Assembling your ECCV research map…</p></main>;
- const metrics=[{n:data.meta.professorCount,label:"target professors",sub:"31 selected institutions"},{n:data.meta.paperCount.toLocaleString(),label:"accepted papers",sub:"90 deeply prioritized"},{n:tracked.length,label:"people tracked",sub:"saved on this device"},{n:data.professors.filter(p=>p.priority==="S"||p.priority==="A").length,label:"high-priority fits",sub:"S + A research matches"}];
- return <main><header className="topbar"><div className="brand"><span className="brand-mark">E</span><div><b>ECCV Navigator</b><small>Malmö · 2026</small></div></div><div className="conference-note"><span className="live-dot"/>Research & networking workspace</div><div className="account-box"><span className="account-name">{USERS[user].name}</span><small className={`sync-pill sync-${sync}`} title={syncError}>{sync==='loading'?'Loading…':sync==='saving'?'Saving…':sync==='synced'?'Synced':`Offline${syncError?': '+syncError:''}`}</small><button onClick={exportData}>Export</button><label className="file-btn">Import<input type="file" accept="application/json" onChange={importData}/></label><button onClick={onLogout}>Switch</button></div></header>
+ const metrics=[{n:data.meta.professorCount,label:"target professors",sub:"31 selected institutions"},{n:data.meta.paperCount.toLocaleString(),label:"accepted papers",sub:"90 deeply prioritized"},{n:tracked.length,label:"people tracked",sub:sync==="synced"?"saved to your account":sync==="saving"?"saving to cloud":"saved locally only"},{n:data.professors.filter(p=>p.priority==="S"||p.priority==="A").length,label:"high-priority fits",sub:"S + A research matches"}];
+ return <main><header className="topbar"><div className="brand"><span className="brand-mark">E</span><div><b>ECCV Navigator</b><small>Malmö · 2026</small></div></div><div className="conference-note"><span className="live-dot"/>Research & networking workspace</div><div className="account-box"><span className="account-name">{USERS[user].name}</span><small className={`sync-pill sync-${sync}`} title={syncError}>{sync==='loading'?'Loading…':sync==='saving'?'Saving…':sync==='synced'?'Cloud synced':`Offline${syncError?': '+syncError:''}`}</small><button onClick={()=>setShowCloudKey(x=>!x)}>{cloudToken?'Cloud key':'Set cloud key'}</button><button onClick={exportData}>Export</button><label className="file-btn">Import<input type="file" accept="application/json" onChange={importData}/></label><button onClick={onLogout}>Switch</button></div></header>
+ {showCloudKey&&<form className="cloud-key-panel" onSubmit={saveCloudKey}><div><b>Cloud sync needs a GitHub key</b><p>Paste a token with Gist access. It stays in this browser and lets your outreach save to the shared cloud file.</p></div><input type="password" value={tokenDraft} onChange={e=>setTokenDraft(e.target.value)} placeholder="GitHub token with gist permission" autoFocus/><button type="submit">Save key</button></form>}
  <section className="hero"><div><p className="eyebrow">HRITHIK SAGAR · PERSONAL RESEARCH INTELLIGENCE</p><h1>Turn a 2,864-paper conference<br/>into <em>your</em> opportunity map.</h1><p className="hero-copy">Explore aligned professors, their accepted work, labs and ECCV coauthor circles. Build a deliberate meeting plan around DoCoG, M3Grounder and Patram.</p></div><div className="hero-card"><span>YOUR RESEARCH SIGNAL</span><b>Grounded Document VLMs</b><p>Mask / pixel grounding · grounded CoT · Document QA · multimodal reasoning · large-scale VLM training</p><div className="signal-bars"><i/><i/><i/><i/><i/></div></div></section>
  <section className="metric-row">{metrics.map((m,i)=><article key={m.label}><span>0{i+1}</span><strong>{m.n}</strong><div><b>{m.label}</b><small>{m.sub}</small></div></article>)}</section>
  <nav className="views">{([['professors','people','Professors'],['papers','papers','Papers'],['institutions','building','Institutions'],['circles','network','Collaboration circles'],['tracker','target','My outreach']] as [View,string,string][]).map(([v,ic,l])=><button key={v} className={view===v?'active':''} onClick={()=>setView(v)}><Icon name={ic}/>{l}{v==='tracker'&&tracked.length>0?<span>{tracked.length}</span>:null}</button>)}</nav>
