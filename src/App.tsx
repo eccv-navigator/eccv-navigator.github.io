@@ -15,16 +15,23 @@ type SyncState="loading"|"synced"|"saving"|"offline";
 const GIST_ID="3ad9041534cb5fe977d17717196bf5a2";
 const GIST_FILE="eccv-notes.json";
 const gistHeaders=(token?:string)=>({...(token?{Authorization:`Bearer ${token}`}:{}),Accept:"application/vnd.github+json","Content-Type":"application/json"});
-const cleanGitHubError=(message:string)=>message.includes("Bad credentials")?"Cloud key is invalid or expired":message;
+const cleanGitHubError=(message:string)=>message.includes("Bad credentials")?"Cloud key is invalid or expired":message.includes("Request timed out")?"Cloud sync timed out. Check the key and try again.":message;
+async function fetchWithTimeout(url:string,init:RequestInit={},ms=12000){
+ const controller=new AbortController();
+ const timer=window.setTimeout(()=>controller.abort(),ms);
+ try{return await fetch(url,{...init,signal:controller.signal})}
+ catch(e){if((e as Error).name==="AbortError")throw new Error("Request timed out");throw e}
+ finally{window.clearTimeout(timer)}
+}
 async function fetchNotes(token?:string):Promise<AllNotes>{
- const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders(token)});
+ const r=await fetchWithTimeout(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders(token)});
  if(!r.ok)throw new Error(`gist read failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
  const d=await r.json();
  return JSON.parse(d.files[GIST_FILE]?.content||"{}");
 }
 async function saveNotes(all:AllNotes,token:string){
  if(!token)throw new Error("Cloud key required to save across devices");
- const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{method:"PATCH",headers:gistHeaders(token),body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(all)}}})});
+ const r=await fetchWithTimeout(`https://api.github.com/gists/${GIST_ID}`,{method:"PATCH",headers:gistHeaders(token),body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(all)}}})});
  if(!r.ok)throw new Error(`gist write failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
 }
 async function saveUserNotes(user:UserId,next:Record<string,Tracker>,token:string){
@@ -55,6 +62,7 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
  const [cloudToken,setCloudToken]=useState(()=>localStorage.getItem(CLOUD_TOKEN_KEY)||"");
  const [tokenDraft,setTokenDraft]=useState("");
  const [showCloudKey,setShowCloudKey]=useState(false);
+ const [syncNonce,setSyncNonce]=useState(0);
  const trackerKey=`eccv-tracker-v1-${user}`;
  const allNotes=useRef<AllNotes>({} as AllNotes);
  const saveTimer=useRef<number|undefined>(undefined);
@@ -84,7 +92,7 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
    setSyncError(cleanGitHubError(String(e?.message||e)));
   });
   return ()=>{cancelled=true};
- },[trackerKey,user,cloudToken]);
+ },[trackerKey,user,cloudToken,syncNonce]);
  useEffect(()=>()=>window.clearTimeout(saveTimer.current),[]);
  const saveCloudKey=(e:React.FormEvent)=>{
   e.preventDefault();
@@ -95,6 +103,7 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
   setTokenDraft("");
   setShowCloudKey(false);
   setSync("loading");
+  setSyncNonce(x=>x+1);
  };
  const save=(next:Record<string,Tracker>)=>{
   setTracker(next);localStorage.setItem(trackerKey,JSON.stringify(next));
