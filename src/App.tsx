@@ -9,13 +9,11 @@ type Tracker={stage:string;bookmarked:boolean;notes:string;lastTouched:string}; 
 type UserId="hrithik"|"madhu"|"swaroopa";
 const USERS:Record<UserId,{name:string;pass:string}>={hrithik:{name:"Hrithik",pass:"Sagar@21"},madhu:{name:"Madhu",pass:"Madhu@00"},swaroopa:{name:"Swaroopa",pass:"Swaroopa@00"}};
 const USER_KEY="eccv-user-id";
-const CLOUD_TOKEN_KEY="eccv-cloud-token";
-type AllNotes=Record<UserId,Record<string,Tracker>>;
+const SYNC_KEY_STORAGE="eccv-sync-key";
+type AllNotes=Partial<Record<UserId,Record<string,Tracker>>>;
 type SyncState="loading"|"synced"|"saving"|"offline";
-const GIST_ID="3ad9041534cb5fe977d17717196bf5a2";
-const GIST_FILE="eccv-notes.json";
-const gistHeaders=(token?:string)=>({...(token?{Authorization:`Bearer ${token}`}:{}),Accept:"application/vnd.github+json","Content-Type":"application/json"});
-const cleanGitHubError=(message:string)=>message.includes("Bad credentials")?"Cloud key is invalid or expired":message.includes("Request timed out")?"Cloud sync timed out. Check the key and try again.":message;
+const SYNC_API_URL=(import.meta.env.VITE_SYNC_API_URL||"").replace(/\/$/,"");
+const cleanSyncError=(message:string)=>message.includes("HTTP 401")?"Sync key is missing or incorrect":message.includes("Request timed out")?"Cloud sync timed out. Try again.":message;
 async function fetchWithTimeout(url:string,init:RequestInit={},ms=12000){
  const controller=new AbortController();
  const timer=window.setTimeout(()=>controller.abort(),ms);
@@ -23,22 +21,19 @@ async function fetchWithTimeout(url:string,init:RequestInit={},ms=12000){
  catch(e){if((e as Error).name==="AbortError")throw new Error("Request timed out");throw e}
  finally{window.clearTimeout(timer)}
 }
-async function fetchNotes(token?:string):Promise<AllNotes>{
- const r=await fetchWithTimeout(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders(token)});
- if(!r.ok)throw new Error(`gist read failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
- const d=await r.json();
- return JSON.parse(d.files[GIST_FILE]?.content||"{}");
+async function fetchNotes(user:UserId,syncKey:string):Promise<Record<string,Tracker>>{
+ if(!SYNC_API_URL)throw new Error("Cloud backend is not configured");
+ if(!syncKey)throw new Error("Sync key is missing");
+ const r=await fetchWithTimeout(`${SYNC_API_URL}/notes?user=${encodeURIComponent(user)}`,{headers:{"X-Sync-Key":syncKey}});
+ if(!r.ok)throw new Error(`notes read failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
+ return (await r.json()).tracker||{};
 }
-async function saveNotes(all:AllNotes,token:string){
- if(!token)throw new Error("Cloud key required to save across devices");
- const r=await fetchWithTimeout(`https://api.github.com/gists/${GIST_ID}`,{method:"PATCH",headers:gistHeaders(token),body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(all)}}})});
- if(!r.ok)throw new Error(`gist write failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
-}
-async function saveUserNotes(user:UserId,next:Record<string,Tracker>,token:string){
- const latest=await fetchNotes(token);
- const merged={...latest,[user]:next};
- await saveNotes(merged,token);
- return merged;
+async function saveUserNotes(user:UserId,next:Record<string,Tracker>,syncKey:string){
+ if(!SYNC_API_URL)throw new Error("Cloud backend is not configured");
+ if(!syncKey)throw new Error("Sync key is missing");
+ const r=await fetchWithTimeout(`${SYNC_API_URL}/notes`,{method:"PUT",headers:{"Content-Type":"application/json","X-Sync-Key":syncKey},body:JSON.stringify({user,tracker:next})});
+ if(!r.ok)throw new Error(`notes write failed: HTTP ${r.status} ${(await r.text()).slice(0,120)}`);
+ return (await r.json()).tracker||next;
 }
 const newerTracker=(a?:Tracker,b?:Tracker)=>{
  if(!a)return b;
@@ -59,9 +54,9 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
  const [data,setData]=useState<Data|null>(null),[view,setView]=useState<View>("professors"),[query,setQuery]=useState(""),[priority,setPriority]=useState("All"),[institutions,setInstitutions]=useState<string[]>([]),[instOpen,setInstOpen]=useState(false),[selected,setSelected]=useState<Professor|null>(null),[tracker,setTracker]=useState<Record<string,Tracker>>({}),[paperFocus,setPaperFocus]=useState("Relevant 90");
  const [sync,setSync]=useState<SyncState>("loading");
  const [syncError,setSyncError]=useState("");
- const [cloudToken,setCloudToken]=useState(()=>localStorage.getItem(CLOUD_TOKEN_KEY)||"");
- const [tokenDraft,setTokenDraft]=useState("");
- const [showCloudKey,setShowCloudKey]=useState(false);
+ const [syncKey,setSyncKey]=useState(()=>localStorage.getItem(SYNC_KEY_STORAGE)||"");
+ const [syncKeyDraft,setSyncKeyDraft]=useState("");
+ const [showSyncKey,setShowSyncKey]=useState(false);
  const [syncNonce,setSyncNonce]=useState(0);
  const trackerKey=`eccv-tracker-v1-${user}`;
  const allNotes=useRef<AllNotes>({} as AllNotes);
@@ -72,16 +67,15 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
   const cached=localStorage.getItem(trackerKey);
   const local=cached?JSON.parse(cached) as Record<string,Tracker>:{};
   if(cached)setTracker(local);
-  fetchNotes(cloudToken).then(all=>{
+  fetchNotes(user,syncKey).then(remote=>{
    if(cancelled)return;
-   allNotes.current=all;
-   const remote=all[user]||{};
+   allNotes.current={[user]:remote};
    const merged=mergeTrackers(local,remote);
    setTracker(merged);
    localStorage.setItem(trackerKey,JSON.stringify(merged));
-   if(cloudToken&&!sameTracker(merged,remote)){
+   if(!sameTracker(merged,remote)){
     setSync("saving");
-    saveUserNotes(user,merged,cloudToken).then(saved=>{if(cancelled)return;allNotes.current=saved;setSyncError("");setSync("synced")}).catch(e=>{if(cancelled)return;setSync("offline");setSyncError(cleanGitHubError(String(e?.message||e)));setShowCloudKey(true)});
+    saveUserNotes(user,merged,syncKey).then(saved=>{if(cancelled)return;allNotes.current={[user]:saved};setSyncError("");setSync("synced")}).catch(e=>{if(cancelled)return;setSync("offline");setSyncError(cleanSyncError(String(e?.message||e)));setShowSyncKey(true)});
    }else{
     setSyncError("");
     setSync("synced");
@@ -89,19 +83,21 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
   }).catch(e=>{
    if(cancelled)return;
    setSync("offline");
-   setSyncError(cleanGitHubError(String(e?.message||e)));
+   setSyncError(cleanSyncError(String(e?.message||e)));
+   setShowSyncKey(true);
   });
   return ()=>{cancelled=true};
- },[trackerKey,user,cloudToken,syncNonce]);
+ },[trackerKey,user,syncKey,syncNonce]);
  useEffect(()=>()=>window.clearTimeout(saveTimer.current),[]);
- const saveCloudKey=(e:React.FormEvent)=>{
+ const retrySync=()=>{setSync("loading");setSyncNonce(x=>x+1)};
+ const saveSyncKey=(e:React.FormEvent)=>{
   e.preventDefault();
-  const next=tokenDraft.trim();
+  const next=syncKeyDraft.trim();
   if(!next)return;
-  localStorage.setItem(CLOUD_TOKEN_KEY,next);
-  setCloudToken(next);
-  setTokenDraft("");
-  setShowCloudKey(false);
+  localStorage.setItem(SYNC_KEY_STORAGE,next);
+  setSyncKey(next);
+  setSyncKeyDraft("");
+  setShowSyncKey(false);
   setSync("loading");
   setSyncNonce(x=>x+1);
  };
@@ -110,7 +106,7 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
   allNotes.current={...allNotes.current,[user]:next};
   setSync("saving");
   window.clearTimeout(saveTimer.current);
-  saveTimer.current=window.setTimeout(()=>{saveUserNotes(user,next,cloudToken).then(all=>{allNotes.current=all;setSyncError("");setSync("synced")}).catch(e=>{setSync("offline");setSyncError(cleanGitHubError(String(e?.message||e)));setShowCloudKey(true)})},450);
+  saveTimer.current=window.setTimeout(()=>{saveUserNotes(user,next,syncKey).then(saved=>{allNotes.current={[user]:saved};setSyncError("");setSync("synced")}).catch(e=>{setSync("offline");setSyncError(cleanSyncError(String(e?.message||e)));setShowSyncKey(true)})},450);
  };
  const exportData=()=>{const blob=new Blob([JSON.stringify(tracker,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`eccv-notes-${user}.json`;a.click();URL.revokeObjectURL(url)};
  const importData=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{save({...tracker,...JSON.parse(String(reader.result))})}catch{alert("That file doesn't look like an exported notes file.")}};reader.readAsText(file);e.target.value=""};
@@ -122,8 +118,8 @@ function Workspace({user,onLogout}:{user:UserId;onLogout:()=>void}){
  const tracked=data?.professors.filter(p=>tracker[p.id]&&(tracker[p.id].bookmarked||tracker[p.id].stage!=="Not reviewed"||tracker[p.id].notes))||[];
  if(!data)return <main className="loading"><div className="loader"/><p>Assembling your ECCV research map…</p></main>;
  const metrics=[{n:data.meta.professorCount,label:"target professors",sub:"31 selected institutions"},{n:data.meta.paperCount.toLocaleString(),label:"accepted papers",sub:"90 deeply prioritized"},{n:tracked.length,label:"people tracked",sub:sync==="synced"?"saved to your account":sync==="saving"?"saving to cloud":"saved locally only"},{n:data.professors.filter(p=>p.priority==="S"||p.priority==="A").length,label:"high-priority fits",sub:"S + A research matches"}];
- return <main><header className="topbar"><div className="brand"><span className="brand-mark">E</span><div><b>ECCV Navigator</b><small>Malmö · 2026</small></div></div><div className="conference-note"><span className="live-dot"/>Research & networking workspace</div><div className="account-box"><span className="account-name">{USERS[user].name}</span><small className={`sync-pill sync-${sync}`} title={syncError}>{sync==='loading'?'Loading…':sync==='saving'?'Saving…':sync==='synced'?'Cloud synced':`Offline${syncError?': '+syncError:''}`}</small><button onClick={()=>setShowCloudKey(x=>!x)}>{cloudToken?'Cloud key':'Set cloud key'}</button><button onClick={exportData}>Export</button><label className="file-btn">Import<input type="file" accept="application/json" onChange={importData}/></label><button onClick={onLogout}>Switch</button></div></header>
- {showCloudKey&&<form className="cloud-key-panel" onSubmit={saveCloudKey}><div><b>Cloud sync needs a GitHub key</b><p>Paste a token with Gist access. It stays in this browser and lets your outreach save to the shared cloud file.</p></div><input type="password" value={tokenDraft} onChange={e=>setTokenDraft(e.target.value)} placeholder="GitHub token with gist permission" autoFocus/><button type="submit">Save key</button></form>}
+ return <main><header className="topbar"><div className="brand"><span className="brand-mark">E</span><div><b>ECCV Navigator</b><small>Malmö · 2026</small></div></div><div className="conference-note"><span className="live-dot"/>Research & networking workspace</div><div className="account-box"><span className="account-name">{USERS[user].name}</span><small className={`sync-pill sync-${sync}`} title={syncError}>{sync==='loading'?'Loading…':sync==='saving'?'Saving…':sync==='synced'?'Cloud synced':`Offline${syncError?': '+syncError:''}`}</small><button onClick={()=>setShowSyncKey(x=>!x)}>{syncKey?'Sync key':'Set sync key'}</button><button onClick={retrySync}>Retry sync</button><button onClick={exportData}>Export</button><label className="file-btn">Import<input type="file" accept="application/json" onChange={importData}/></label><button onClick={onLogout}>Switch</button></div></header>
+ {showSyncKey&&<form className="cloud-key-panel" onSubmit={saveSyncKey}><div><b>Cloud sync needs a sync key</b><p>Paste the ECCV sync key. It only unlocks outreach notes, not Cloudflare or GitHub.</p></div><input type="password" value={syncKeyDraft} onChange={e=>setSyncKeyDraft(e.target.value)} placeholder="ECCV sync key" autoFocus/><button type="submit">Save key</button></form>}
  <section className="hero"><div><p className="eyebrow">HRITHIK SAGAR · PERSONAL RESEARCH INTELLIGENCE</p><h1>Turn a 2,864-paper conference<br/>into <em>your</em> opportunity map.</h1><p className="hero-copy">Explore aligned professors, their accepted work, labs and ECCV coauthor circles. Build a deliberate meeting plan around DoCoG, M3Grounder and Patram.</p></div><div className="hero-card"><span>YOUR RESEARCH SIGNAL</span><b>Grounded Document VLMs</b><p>Mask / pixel grounding · grounded CoT · Document QA · multimodal reasoning · large-scale VLM training</p><div className="signal-bars"><i/><i/><i/><i/><i/></div></div></section>
  <section className="metric-row">{metrics.map((m,i)=><article key={m.label}><span>0{i+1}</span><strong>{m.n}</strong><div><b>{m.label}</b><small>{m.sub}</small></div></article>)}</section>
  <nav className="views">{([['professors','people','Professors'],['papers','papers','Papers'],['institutions','building','Institutions'],['circles','network','Collaboration circles'],['tracker','target','My outreach']] as [View,string,string][]).map(([v,ic,l])=><button key={v} className={view===v?'active':''} onClick={()=>setView(v)}><Icon name={ic}/>{l}{v==='tracker'&&tracked.length>0?<span>{tracked.length}</span>:null}</button>)}</nav>

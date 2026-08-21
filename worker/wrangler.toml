@@ -1,0 +1,7 @@
+name = "eccv-navigator-sync"
+main = "src/index.js"
+compatibility_date = "2026-08-21"
+
+[[kv_namespaces]]
+binding = "NOTES"
+id = "ee2e2dc1e41d4b359742fb5a80654b7d"

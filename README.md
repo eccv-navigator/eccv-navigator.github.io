@@ -34,7 +34,23 @@ The production files are written to `dist/`.
 
 - Main dataset: `public/eccv-data.json`
 - Social preview image: `public/og.png`
-- Bookmarks, contact status, and notes are cached in the current browser and synced to the shared GitHub Gist per signed-in user.
-- Saving to the cloud requires entering a GitHub token with Gist access through the app's `Set cloud key` button on each device.
-- Do not commit or paste the token into the source code. If a token was pushed to GitHub, revoke it and create a fresh one.
+- Bookmarks, contact status, and notes are cached in the current browser and synced through a tiny Cloudflare Worker backend.
+- The Worker stores tracker JSON in Cloudflare KV, so no GitHub or Cloudflare deployment token is needed in the browser.
+- Each browser stores a limited ECCV sync key that only unlocks the notes API.
 - If the status pill says `Offline`, the latest change is saved locally only until cloud sync succeeds.
+
+## Cloud sync backend
+
+The backend lives in `worker/` and exposes:
+
+- `GET /notes?user=hrithik`
+- `PUT /notes` with `{ "user": "hrithik", "tracker": { ... } }`
+
+Deploy outline:
+
+1. Create a Cloudflare KV namespace.
+2. Put its production namespace id into `worker/wrangler.toml`.
+3. Set a Worker secret named `SYNC_KEY`.
+4. Deploy the Worker with Wrangler.
+5. Set `VITE_SYNC_API_URL` to the Worker URL before building the site.
+6. Rebuild and deploy GitHub Pages.
