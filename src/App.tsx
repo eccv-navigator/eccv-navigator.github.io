@@ -12,7 +12,7 @@ const USER_KEY="eccv-user-id";
 type AllNotes=Record<UserId,Record<string,Tracker>>;
 const GIST_ID="3ad9041534cb5fe977d17717196bf5a2";
 const GIST_FILE="eccv-notes.json";
-const GT="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";
+const GT="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";
 const gistHeaders={Authorization:`token ${GT}`,"Content-Type":"application/json"};
 async function fetchNotes():Promise<AllNotes>{
  const r=await fetch(`https://api.github.com/gists/${GIST_ID}`,{headers:gistHeaders});
